@@ -1,241 +1,297 @@
-import numpy as np
-import pandas as pd
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import confusion_matrix
-from sklearn.tree import DecisionTreeClassifier
 import streamlit as st
+import pandas as pd
+import numpy as np
+from sklearn.linear_model import LogisticRegression
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.metrics import confusion_matrix
 
 # 페이지 설정
 st.set_page_config(
-    page_title="채점표 및 성능 평가 - 뇌졸중 예측 실습실", page_icon="📋", layout="wide"
+    page_title="채점표 - 뇌졸중 예측 실습실",
+    page_icon="📋",
+    layout="wide"
 )
 
-st.title("📋 뇌졸중 예측 모델 채점표 및 성능 평가")
-st.markdown(
-    "테스트 데이터를 이용해 두 분류 모델의 혼동행렬(Confusion Matrix)과"
-    " 다양한 평가지표(정확도, 재현율, 정밀도, F1 score)를 비교하고,"
-    " 오답 사례(놓친 환자 및 헛짚은 사람)를 상세히 살펴보는 공간입니다."
-)
+st.title("📋 모델 채점표 및 평가")
+st.markdown("혼동행렬(Confusion Matrix)과 주요 평가 지표(정확도, 재현율, 정밀도, F1 score)를 비교하고, 오답 사례를 분석합니다.")
+st.markdown("---")
 
 # 데이터 로드
-DATA_URL = (
-    "https://raw.githubusercontent.com/annskirt-netizen/data/refs/heads/main/stroke.csv"
-)
-
+DATA_URL = "https://raw.githubusercontent.com/greatsong/modudata/main/data/stroke.csv"
 
 @st.cache_data
 def load_data(url):
-  return pd.read_csv(url, encoding="utf-8")
-
+    df = pd.read_csv(url, encoding="utf-8")
+    return df
 
 try:
-  df = load_data(DATA_URL)
+    df = load_data(DATA_URL)
 except Exception as e:
-  st.error(f"데이터를 불러오는 중 오류가 발생했습니다: {e}")
-  st.stop()
+    st.error(f"데이터를 불러오는 중 오류가 발생했습니다: {e}")
+    st.stop()
 
-st.divider()
-
-# 1. 속성 선택 영역 (분류 모델 페이지와 동일하게 기본 4개 속성 고정 또는 전체 활용)
-# 사용자가 직접 고를 수도 있도록 동일한 속성 선택 제공
-feature_mapping = {
+# 속성 매핑 정의
+feature_map = {
     "age": "나이",
     "avg_glucose_level": "평균 혈당",
     "bmi": "체질량지수",
     "hypertension": "고혈압",
-    "heart_disease": "심장병",
+    "heart_disease": "심장병"
 }
+korean_features = list(feature_map.values())
 
-available_features = list(feature_mapping.keys())
-default_features = [
-    "age",
-    "avg_glucose_level",
-    "hypertension",
-    "heart_disease",
-]
+st.subheader("⚙️ 모델 입력 속성 선택")
+default_korean = ["나이", "평균 혈당", "고혈압", "심장병"]
 
-st.subheader("1. 모델 입력 속성 설정")
-selected_features_korean = st.multiselect(
-    "입력으로 사용할 속성을 선택하세요",
-    options=[feature_mapping[f] for f in available_features],
-    default=[feature_mapping[f] for f in default_features],
+selected_korean = st.multiselect(
+    "학습에 사용할 속성을 고르세요 (2개 이상 선택):",
+    options=korean_features,
+    default=default_korean,
+    key="score_features"
 )
 
-reverse_mapping = {v: k for k, v in feature_mapping.items()}
-selected_features = [
-    reverse_mapping[k] for k in selected_features_korean
-]
+selected_eng = [k for k, v in feature_map.items() if v in selected_korean]
 
-if len(selected_features) < 2:
-  st.warning("⚠️ 속성을 **2개 이상** 선택해 주세요!")
-  st.stop()
+if len(selected_eng) < 2:
+    st.warning("⚠️ 속성을 **2개 이상** 선택해 주세요.")
+    st.stop()
 
-st.divider()
-
-# 2. 데이터 전처리 및 분할 (분류 모델 페이지와 정확히 동일한 로직)
+# 데이터 전처리 및 분할 (동일 로직)
 df_sorted = df.sort_index().reset_index(drop=True)
 
-train_indices = []
 test_indices = []
+train_indices = []
 
 for i in range(0, len(df_sorted), 10):
-  chunk = df_sorted.iloc[i : i + 10]
-  if len(chunk) < 10:
-    split_point = int(len(chunk) * 0.3)
-    test_indices.extend(chunk.iloc[:split_point].index.tolist())
-    train_indices.extend(chunk.iloc[split_point:].index.tolist())
-  else:
-    test_indices.extend(chunk.iloc[:3].index.tolist())
-    train_indices.extend(chunk.iloc[3:].index.tolist())
+    chunk = range(i, min(i + 10, len(df_sorted)))
+    for idx in chunk:
+        if (idx % 10) < 3:
+            test_indices.append(idx)
+        else:
+            train_indices.append(idx)
 
 train_df = df_sorted.loc[train_indices].copy()
 test_df = df_sorted.loc[test_indices].copy()
 
-# 체질량지수(bmi) 결측치 처리: 훈련용의 중앙값으로 채우기
-if "bmi" in selected_features:
-  train_bmi_median = train_df["bmi"].median()
-  train_df["bmi"] = train_df["bmi"].fillna(train_bmi_median)
-  test_df["bmi"] = test_df["bmi"].fillna(train_bmi_median)
+if "bmi" in selected_eng:
+    train_bmi_median = train_df["bmi"].median()
+    train_df["bmi"] = train_df["bmi"].fillna(train_bmi_median)
+    test_df["bmi"] = test_df["bmi"].fillna(train_bmi_median)
 
-X_train = train_df[selected_features]
+X_train = train_df[selected_eng]
 y_train = train_df["stroke"]
-X_test = test_df[selected_features]
+X_test = test_df[selected_eng]
 y_test = test_df["stroke"]
 
-# 테스트용 사람 수와 그중 뇌졸중인 사람 수 안내
+# 테스트용 사람 수 및 실제 뇌졸중인 사람 수 안내
 total_test_count = len(y_test)
-test_stroke_count = int(y_test.sum())
-st.info(
-    f"📌 **테스트 데이터 정보**: 총 **{total_test_count:,}명** 중 실제 뇌졸중"
-    f" 환자는 **{test_stroke_count:,}명**입니다."
-)
+actual_stroke_test_count = int(y_test.sum())
+st.markdown(f"📌 **테스트용 사람 수**: **{total_test_count:,}명** (그중 실제 뇌졸중인 사람 수: **{actual_stroke_test_count:,}명**)")
+st.markdown("---")
 
-# 3. 모델 학습
-# 3-1. 로지스틱 회귀 모델
-lr_model = LogisticRegression(random_state=42)
+# 모델 학습 및 예측
+lr_model = LogisticRegression(random_state=42, max_iter=1000)
 lr_model.fit(X_train, y_train)
 lr_pred = lr_model.predict(X_test)
 
-# 3-2. 의사결정트리 모델
-dt_model = DecisionTreeClassifier(
-    max_depth=3, min_samples_split=5, random_state=42
-)
+dt_model = DecisionTreeClassifier(max_depth=3, min_samples_leaf=5, random_state=42)
 dt_model.fit(X_train, y_train)
 dt_pred = dt_model.predict(X_test)
 
-# 3-3. 베이스라인 모델 (훈련용에서 많은 쪽으로만 답하는 모델)
+# 베이스라인 (훈련용에서 많은 쪽) 예측
 majority_class = y_train.mode()[0]
 baseline_pred = np.full_like(y_test, majority_class)
 
+# 혼동행렬 계산 함수 (sklearn confusion_matrix는 [[TN, FP], [FN, TP]])
+def get_cm_counts(y_true, y_pred):
+    cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
+    tn, fp, fn, tp = cm.ravel()
+    return int(tn), int(fp), int(fn), int(tp)
 
-# 지표 계산 함수 (정확도, 재현율, 정밀도, F1)
-def calculate_metrics(y_true, y_pred):
-  cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
-  tn, fp, fn, tp = cm.ravel()
+lr_tn, lr_fp, lr_fn, lr_tp = get_cm_counts(y_test, lr_pred)
+dt_tn, dt_fp, dt_fn, dt_tp = get_cm_counts(y_test, dt_pred)
+base_tn, base_fp, base_fn, base_tp = get_cm_counts(y_test, baseline_pred)
 
-  total = tn + fp + fn + tp
-  accuracy = (tp + tn) / total if total > 0 else 0
-  recall = tp / (tp + fn) if (tp + fn) > 0 else 0  # 재현율 (실제 뇌졸중 중 맞춘 비율)
-  precision = tp / (tp + fp) if (tp + fp) > 0 else None  # 정밀도 (예측한 뇌졸중 중 맞춘 비율)
+# ---------------------------------------------------------
+# 1. 혼동행렬 2x2 표 표시 (행: 실제, 열: 예측)
+# ---------------------------------------------------------
+st.subheader("📊 모델별 혼동행렬 (Confusion Matrix)")
+st.markdown("행은 **실제 값**, 열은 **예측 값**을 나타냅니다.")
 
-  if precision is None or precision == 0 and recall == 0:
-    f1 = 0
-  elif precision is None:
-    f1 = "계산할 수 없음"
-  else:
-    f1 = (2 * precision * recall) / (precision + recall)
+col1, col2 = st.columns(2)
 
-  return tn, fp, fn, tp, accuracy, recall, precision, f1
+with col1:
+    st.markdown("**로지스틱 회귀(확률로 답하는 모델)**")
+    lr_cm_df = pd.DataFrame(
+        [
+            [f"TN: {lr_tn:,}", f"FP: {lr_fp:,}", f"합계: {lr_tn + lr_fp:,}"],
+            [f"FN: {lr_fn:,}", f"TP: {lr_tp:,}", f"합계: {lr_fn + lr_tp:,}"],
+            [f"합계: {lr_tn + lr_fn:,}", f"합계: {lr_fp + lr_tp:,}", f"전체: {total_test_count:,}"]
+        ],
+        index=["실제: 아님(0)", "실제: 뇌졸중(1)", "합계"],
+        columns=["예측: 아님(0)", "예측: 뇌졸중(1)", "합계"]
+    )
+    st.dataframe(lr_cm_df, use_container_width=True)
 
+with col2:
+    st.markdown("**의사결정트리(질문으로 답하는 모델)**")
+    dt_cm_df = pd.DataFrame(
+        [
+            [f"TN: {dt_tn:,}", f"FP: {dt_fp:,}", f"합계: {dt_tn + dt_fp:,}"],
+            [f"FN: {dt_fn:,}", f"FN: {dt_fn:,}" if False else f"FN: {dt_fn:,}", f"합계: {dt_fn + dt_tp:,}"], # text fix
+            [f"합계: {dt_tn + dt_fn:,}", f"합계: {dt_fp + dt_tp:,}", f"전체: {total_test_count:,}"]
+        ],
+        index=["실제: 아님(0)", "실제: 뇌졸중(1)", "합계"],
+        columns=["예측: 아님(0)", "예측: 뇌졸중(1)", "합계"]
+    )
+    # 수정된 의사결정트리 데이터프레임 구성 반영
+    dt_cm_df = pd.DataFrame(
+        [
+            [f"TN: {dt_tn:,}", f"FP: {dt_fp:,}", f"합계: {dt_tn + dt_fp:,}"],
+            [f"FN: {dt_fn:,}", f"TP: {dt_tp:,}", f"합계: {dt_fn + dt_tp:,}"],
+            [f"합계: {dt_tn + dt_fn:,}", f"합계: {dt_fp + dt_tp:,}", f"전체: {total_test_count:,}"]
+        ],
+        index=["실제: 아님(0)", "실제: 뇌졸중(1)", "합계"],
+        columns=["예측: 아님(0)", "예측: 뇌졸중(1)", "합계"]
+    )
+    st.dataframe(dt_cm_df, use_container_width=True)
 
-lr_metrics = calculate_metrics(y_test, lr_pred)
-dt_metrics = calculate_metrics(y_test, dt_pred)
-base_metrics = calculate_metrics(y_test, baseline_pred)
+st.markdown("---")
 
-st.subheader("2. 모델별 혼동행렬 (Confusion Matrix)")
+# ---------------------------------------------------------
+# 2. 성능 지표 비교표 (정확도, 재현율, 정밀도, F1)
+# ---------------------------------------------------------
+st.subheader("🏆 모델 성능 지표 비교")
 
-col_cm1, col_cm2 = st.columns(2)
+def calc_metrics(tn, fp, fn, tp):
+    total = tn + fp + fn + tp
+    accuracy = (tp + tn) / total if total > 0 else 0
+    # 재현율 분모: 실제 뇌졸중인 사람 수 (tp + fn)
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+    
+    # 정밀도 분모: 뇌졸중이라 예측한 사람 수 (tp + fp)
+    predicted_stroke = tp + fp
+    if predicted_stroke == 0:
+        precision = "계산할 수 없음"
+        f1 = "계산할 수 없음"
+    else:
+        precision_val = tp / predicted_stroke
+        precision = f"{precision_val:.4f}"
+        # F1 = 2 * precision * recall / (precision + recall)
+        if (precision_val + recall) == 0:
+            f1 = "계산할 수 없음"
+        else:
+            f1_val = 2 * precision_val * recall / (precision_val + recall)
+            f1 = f"{f1_val:.4f}"
+        precision = f"{precision_val * 100:.2f}%"
+        f1 = f"{f1 * 100 if isinstance(f1, float) else f1}" # format safety
+        if isinstance(f1_val, float):
+            f1 = f"{f1_val * 100:.2f}%"
 
+    return {
+        "정확도 (%)": f"{accuracy * 100:.2f}%",
+        "재현율 (%)": f"{recall * 100:.2f}%",
+        "정밀도": precision if precision != "계산할 수 없음" else "계산할 수 없음",
+        "F1 스코어": f1 if f1 != "계산할 수 없음" else "계산할 수 없음"
+    }
 
-def display_confusion_matrix(tn, fp, fn, tp, model_title):
-  cm_df = pd.DataFrame(
-      [
-          {
-              "예측: 정상(0)": f"TN: {tn:,}명",
-              "예측: 뇌졸중(1)": f"FP: {fp:,}명",
-              "행 합계": f"{tn + fp:,}명",
-          },
-          {
-              "예측: 정상(0)": f"FN: {fn:,}명",
-              "예측: 뇌졸중(1)": f"TP: {tp:,}명",
-              "행 합계": f"{fn + tp:,}명",
-          },
-      ],
-      index=["실제: 정상(0)", "실제: 뇌졸중(1)"],
-  )
-  cm_df.loc["열 합계"] = [
-      f"{tn + fn:,}명",
-      f"{fp + tp:,}명",
-      f"{tn + fp + fn + tp:,}명",
-  ]
-  st.write(f"**{model_title}**")
-  st.dataframe(cm_df, use_container_width=True)
+lr_metrics = calc_metrics(lr_tn, lr_fp, lr_fn, lr_tp)
+dt_metrics = calc_metrics(dt_tn, dt_fp, dt_fn, dt_tp)
+base_metrics = calc_metrics(base_tn, base_fp, base_fn, base_tp)
 
-
-with col_cm1:
-  display_confusion_matrix(
-      lr_metrics[0],
-      lr_metrics[1],
-      lr_metrics[2],
-      lr_metrics[3],
-      "로지스틱 회귀(확률로 답하는 모델)",
-  )
-
-with col_cm2:
-  display_confusion_matrix(
-      dt_metrics[0],
-      dt_metrics[1],
-      dt_metrics[2],
-      dt_metrics[3],
-      "의사결정트리(질문으로 답하는 모델)",
-  )
-
-st.divider()
-
-# 4. 성능 지표 비교 표
-st.subheader("3. 주요 평가지표 비교 표")
-
-
-def format_f1(f1_val):
-  if f1_val == "계산할 수 없음":
-    return "계산할 수 없음"
-  return f"{f1_val:.4f}"
-
-
-performance_data = [
+metrics_table = pd.DataFrame([
     {
-        "모델 이름": "로지스틱 회귀(확률로 답하는 모델)",
-        "정확도(Accuracy)": f"{lr_metrics[4]:.4f}",
-        "재현율(Recall)": f"{lr_metrics[5]:.4f}",
-        "정밀도(Precision)": (
-            f"{lr_metrics[6]:.4f}"
-            if lr_metrics[6] is not None
-            else "계산할 수 없음"
-        ),
-        "F1 Score": format_f1(lr_metrics[7]),
+        "모델 구분": "로지스틱 회귀 (확률로 답하는 모델)",
+        **lr_metrics
     },
     {
-        "모델 이름": "의사결정트리(질문으로 답하는 모델)",
-        "정확도(Accuracy)": f"{dt_metrics[4]:.4f}",
-        "재현율(Recall)": f"{dt_metrics[5]:.4f}",
-        "정밀도(Precision)": (
-            f"{dt_metrics[6]:.4f}"
-            if dt_metrics[6] is not None
-            else "계산할 수 없음"
-        ),
-        "F1 Score": format_f1(dt_metrics[7]),
+        "모델 구분": "의사결정트리 (질문으로 답하는 모델)",
+        **dt_metrics
     },
     {
-        "모델 이름": "다수 클래스 기준 모델 (베이스라인)",
-        "정확도(Accuracy)": f"{base_metrics[4]:.4f}",
-        "재현율(Recall)": f"{base_
+        "모델 구분": "다수 클래스 예측 모델 (베이스라인)",
+        **base_metrics
+    }
+])
+
+st.dataframe(metrics_table, use_container_width=True)
+
+st.markdown("---")
+
+# ---------------------------------------------------------
+# 3. 오답 사례 분석 (놓친 환자 FN vs 헛짚은 사람 FP)
+# ---------------------------------------------------------
+st.subheader("🔍 오답 환자 목록 분석")
+
+# 모델 선택selectbox
+chosen_model_name = st.selectbox(
+    "오답 목록을 확인할 모델을 선택하세요:",
+    options=["로지스틱 회귀 (확률로 답하는 모델)", "의사결정트리 (질문으로 답하는 모델)"]
+]
+
+if chosen_model_name.startswith("로지스틱"):
+    chosen_pred = lr_pred
+    chosen_fn = lr_fn
+    chosen_fp = lr_fp
+else:
+    chosen_pred = dt_pred
+    chosen_fn = dt_fn
+    chosen_fp = dt_fp
+
+# 테스트 데이터프레임에 예측값 결합
+eval_df = test_df.copy()
+eval_df["pred"] = chosen_pred
+
+# 놓친 환자 (실제 1인데 0으로 예측) -> FN
+fn_df = eval_df[(eval_df["stroke"] == 1) & (eval_df["pred"] == 0)].copy()
+# 헛짚은 사람 (실제 0인데 1로 예측) -> FP
+fp_df = eval_df[(eval_df["stroke"] == 0) & (eval_df["pred"] == 1)].copy()
+
+# 나이가 많은 순서로 정렬
+fn_df = fn_df.sort_values(by="age", ascending=False).reset_index(drop=True)
+fp_df = fp_df.sort_values(by="age", ascending=False).reset_index(drop=True)
+
+fn_total_count = len(fn_df)
+fp_total_count = len(fp_df)
+
+# 상위 20줄 제한
+fn_display_df = fn_df.head(20).copy()
+fp_display_df = fp_df.head(20).copy()
+
+col_fn, col_fp = st.columns(2)
+
+with col_fn:
+    st.markdown(f"#### 놓친 환자 목록 (실제 뇌졸중인데 아니라고 예측) - 전체 {fn_total_count}명")
+    if fn_total_count > 20:
+        st.caption("⚠️ 인원이 20명을 초과하여 상위 20명만 표시합니다.")
+    
+    if not fn_display_df.empty:
+        display_fn_table = pd.DataFrame({
+            "번호": range(1, len(fn_display_df) + 1),
+            "나이": fn_display_df["age"],
+            "평균 혈당": fn_display_df["avg_glucose_level"],
+            "고혈압 여부": fn_display_df["hypertension"].map({0: "없음", 1: "있음"}),
+            "심장병 여부": fn_display_df["heart_disease"].map({0: "없음", 1: "있음"})
+        })
+        st.dataframe(display_fn_table, use_container_width=True, hide_index=True)
+    else:
+        st.info("놓친 환자가 없습니다.")
+
+with col_fp:
+    st.markdown(f"#### 헛짚은 사람 목록 (실제 아닌데 뇌졸중이라고 예측) - 전체 {fp_total_count}명")
+    if fp_total_count > 20:
+        st.caption("⚠️ 인원이 20명을 초과하여 상위 20명만 표시합니다.")
+    
+    if not fp_display_df.empty:
+        display_fp_table = pd.DataFrame({
+            "번호": range(1, len(fp_display_df) + 1),
+            "나이": fp_display_df["age"],
+            "평균 혈당": fp_display_df["avg_glucose_level"],
+            "고혈압 여부": fp_display_df["hypertension"].map({0: "없음", 1: "있음"}),
+            "심장병 여부": fp_display_df["heart_disease"].map({0: "없음", 1: "있음"})
+        })
+        st.dataframe(display_fp_table, use_container_width=True, hide_index=True)
+    else:
+        st.info("헛짚은 사람이 없습니다.")
+
+st.markdown(f"📌 **확인**: 위 목록의 사람 수({fn_total_count}명, {fp_total_count}명)는 혼동행렬의 **FN(거짓 음성)** 및 **FP(거짓 양성)** 칸의 수와 정확히 일치합니다.")
