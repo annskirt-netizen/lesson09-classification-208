@@ -85,7 +85,6 @@ y_test = test_df["stroke"]
 total_test_count = len(y_test)
 
 # 모델 학습 (가중치 조정 전 vs 후)
-# 1. 로지스틱 회귀
 lr_before = LogisticRegression(random_state=42, max_iter=1000)
 lr_before.fit(X_train, y_train)
 lr_pred_before = lr_before.predict(X_test)
@@ -94,7 +93,6 @@ lr_after = LogisticRegression(class_weight='balanced', random_state=42, max_iter
 lr_after.fit(X_train, y_train)
 lr_pred_after = lr_after.predict(X_test)
 
-# 2. 의사결정트리
 dt_before = DecisionTreeClassifier(max_depth=3, min_samples_leaf=5, random_state=42)
 dt_before.fit(X_train, y_train)
 dt_pred_before = dt_before.predict(X_test)
@@ -162,9 +160,6 @@ with col2:
 
 st.markdown("---")
 
-# ---------------------------------------------------------
-# 산점도 및 결정 경계 시각화 (2차원 또는 3차원)
-# ---------------------------------------------------------
 st.subheader("🗺️ 가중치 조정 전·후 0.5 경계선 비교 시각화")
 
 vis_model_choice = st.selectbox(
@@ -207,7 +202,6 @@ if len(selected_eng) == 2:
     probs_b = m_before.predict_proba(grid_data_b)[:, 1].reshape(xx.shape)
     probs_a = m_after.predict_proba(grid_data_a)[:, 1].reshape(xx.shape)
 
-    # 조정 전 경계선 (파란색 실선)
     fig.add_trace(go.Contour(
         z=probs_b, x=np.linspace(x_min - x_r*0.1, x_max + x_r*0.1, 200), y=np.linspace(y_min - y_r*0.1, y_max + y_r*0.1, 200),
         contours=dict(start=0.5, end=0.5, size=0, coloring='lines'),
@@ -215,7 +209,6 @@ if len(selected_eng) == 2:
         name='조정 전 0.5 경계선', showscale=False
     ))
 
-    # 조정 후 경계선 (주황색 파선)
     fig.add_trace(go.Contour(
         z=probs_a, x=np.linspace(x_min - x_r*0.1, x_max + x_r*0.1, 200), y=np.linspace(y_min - y_r*0.1, y_max + y_r*0.1, 200),
         contours=dict(start=0.5, end=0.5, size=0, coloring='lines'),
@@ -226,7 +219,6 @@ if len(selected_eng) == 2:
     st.plotly_chart(fig, use_container_width=True)
 
 else:
-    # 3개 이상 선택 시 3차원 산점도 및 평면 비교
     x_eng, y_eng, z_eng = selected_eng[0], selected_eng[1], selected_eng[2]
     x_kor, y_kor, z_kor = feature_map[x_eng], feature_map[y_eng], feature_map[z_eng]
 
@@ -276,4 +268,4 @@ else:
         name='조정 후 0.5 평면'
     ))
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_
