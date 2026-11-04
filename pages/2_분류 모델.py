@@ -1,262 +1,301 @@
-from datetime import datetime
-import pandas as pd
-import plotly.express as px
-import requests
 import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.express as px
+import plotly.graph_objects as go
+from sklearn.linear_model import LogisticRegression
+from sklearn.tree import DecisionTreeClassifier
 
-# 1. 페이지 기본 설정 (브라우저 탭 제목과 아이콘)
+# 페이지 설정
 st.set_page_config(
-    page_title="박스오피스 타임머신", page_icon="🎬", layout="wide"
+    page_title="분류 모델 - 뇌졸중 예측 실습실",
+    page_icon="🤖",
+    layout="wide"
 )
 
-# 앱 제목과 설명
-st.title("🎬 박스오피스 타임머신")
-st.markdown(
-    "월과 일을 선택하면, 최근 10년 동안 해마다 그 날짜에 어떤 영화가 박스오피스"
-    " 1위를 차지했는지 살펴볼 수 있습니다."
-)
+st.title("🤖 뇌졸중 예측 분류 모델 실습실")
+st.markdown("로지스틱 회귀와 의사결정트리 모델을 학습시키고, 결정 경계와 트리 구조를 시각화합니다.")
+st.markdown("---")
 
-# 2. 비밀 금고(secrets)에서 KOBIS API 인증키 불러오기
+# 데이터 로드
+DATA_URL = "https://raw.githubusercontent.com/greatsong/modudata/main/data/stroke.csv"
+
+@st.cache_data
+def load_data(url):
+    df = pd.read_csv(url, encoding="utf-8")
+    return df
+
 try:
-  API_KEY = st.secrets["KOBIS_KEY"]
-except Exception:
-  st.error(
-      "⚠️ 스트림릿 비밀 금고(secrets.toml)에 'KOBIS_KEY'가 설정되어 있지"
-      " 않습니다. 인증키를 먼저 등록해 주세요."
-  )
-  st.stop()
+    df = load_data(DATA_URL)
+except Exception as e:
+    st.error(f"데이터를 불러오는 중 오류가 발생했습니다: {e}")
+    st.stop()
 
+# 속성 매핑 정의 (영문 열 이름 <-> 우리말 이름)
+feature_map = {
+    "age": "나이",
+    "avg_glucose_level": "평균 혈당",
+    "bmi": "체질량지수",
+    "hypertension": "고혈압",
+    "heart_disease": "심장병"
+}
+eng_features = list(feature_map.keys())
+korean_features = list(feature_map.values())
 
-# 3. KOBIS API에서 특정 날짜(yyyymmdd)의 일별 박스오피스 데이터를 가져오는 함수
-# @st.cache_data를 사용해 한 번 불러온 날짜의 결과는 하루(86400초) 동안 기억합니다.
-@st.cache_data(ttl=86400)
-def get_box_office_data(target_dt_str):
-  url = "https://www.kobis.or.kr/kobisopenapi/webservice/rest/boxoffice/searchDailyBoxOfficeList.json"
-  params = {"key": API_KEY, "targetDt": target_dt_str}
-  try:
-    response = requests.get(url, params=params)
-    data = response.json()
-    return data
-  except Exception as e:
-    return None
+st.subheader("⚙️ 모델 입력 속성 선택")
+# 기본값: bmi를 뺀 넷 (age, avg_glucose_level, hypertension, heart_disease)
+default_korean = ["나이", "평균 혈당", "고혈압", "심장병"]
 
+selected_korean = st.multiselect(
+    "학습에 사용할 속성을 고르세요 (2개 이상 선택):",
+    options=korean_features,
+    default=default_korean
+)
 
-st.divider()
+# 우리말 이름을 영문 열 이름으로 변환
+selected_eng = [k for k, v in feature_map.items() if v in selected_korean]
 
-# 4. 날짜 선택 영역 (자주 찾는 날짜 버튼 + 직접 선택)
-st.subheader("📅 조회할 날짜 선택")
+# 2개보다 적게 고르면 안내문 표시 후 멈춤
+if len(selected_eng) < 2:
+    st.warning("⚠️ 속성을 **2개 이상** 선택해 주세요.")
+    st.stop()
 
-# 자주 찾는 날짜 버튼 배치 (클릭 시 세션 상태에 월/일 반영)
-col_btn1, col_btn2, col_btn3, col_btn4 = st.columns([1, 1, 1, 3])
+# ---------------------------------------------------------
+# 데이터 전처리 및 분할 (요구사항 반영)
+# ---------------------------------------------------------
+# 1. 번호 순(인덱스 순) 정렬
+df_sorted = df.sort_index().reset_index(drop=True)
 
-if "selected_month" not in st.session_state:
-  st.session_state.selected_month = 12
-if "selected_day" not in st.session_state:
-  st.session_state.selected_day = 25
+# 2. 10명씩 묶어 각 묶음의 앞 3명을 테스트용으로 고정 (10명 중 index 0, 1, 2가 테스트)
+test_indices = []
+train_indices = []
 
-if col_btn1.button("🎄 크리스마스 (12/25)"):
-  st.session_state.selected_month = 12
-  st.session_state.selected_day = 25
-if col_btn2.button("🇰🇷 광복절 (8/15)"):
-  st.session_state.selected_month = 8
-  st.session_state.selected_day = 15
-if col_btn3.button("👶 어린이날 (5/5)"):
-  st.session_state.selected_month = 5
-  st.session_state.selected_day = 5
+for i in range(0, len(df_sorted), 10):
+    chunk = range(i, min(i + 10, len(df_sorted)))
+    for idx in chunk:
+        # 10명 중 모듈러 연산으로 앞 3명(0, 1, 2) 선택
+        if (idx % 10) < 3:
+            test_indices.append(idx)
+        else:
+            train_indices.append(idx)
 
-# 월, 일을 고를 수 있는 슬라이더 또는 숫자 입력창
-col_m, col_d = st.columns(2)
-with col_m:
-  selected_month = st.selectbox(
-      "월 선택",
-      list(range(1, 13)),
-      index=st.session_state.selected_month - 1,
-  )
-with col_d:
-  # 각 월의 대략적인 최대 일수 고려 (간이 설정)
-  selected_day = st.number_input(
-      "일 선택", min_value=1, max_value=31, value=st.session_state.selected_day
-  )
+train_df = df_sorted.loc[train_indices].copy()
+test_df = df_sorted.loc[test_indices].copy()
 
-st.divider()
+# 3. 체질량지수(bmi) 결측치는 훈련용의 중앙값으로 채우기
+if "bmi" in selected_eng:
+    train_bmi_median = train_df["bmi"].median()
+    train_df["bmi"] = train_df["bmi"].fillna(train_bmi_median)
+    test_df["bmi"] = test_df["bmi"].fillna(train_bmi_median)
 
-# 5. 최근 10년 연도 계산 (올해부터 과거 10년)
-current_year = datetime.now().year
-target_years = list(range(current_year - 9, current_year + 1))  # 최근 10년
+# 모델 학습용 X, y 준비
+X_train = train_df[selected_eng]
+y_train = train_df["stroke"]
+X_test = test_df[selected_eng]
+y_test = test_df["stroke"]
 
-# 데이터 수집 리스트
-results_data = []
-today = datetime.now().date()
+# ---------------------------------------------------------
+# 모델 학습
+# ---------------------------------------------------------
+# 1. 로지스틱 회귀 (확률로 답하는 모델)
+lr_model = LogisticRegression(random_state=42, max_iter=1000)
+lr_model.fit(X_train, y_train)
 
-# 진행 바 표시
-progress_text = "최근 10년 동안의 박스오피스 데이터를 불러오는 중입니다..."
-progress_bar = st.progress(0, text=progress_text)
+lr_train_acc = lr_model.score(X_train, y_train)
+lr_test_acc = lr_model.score(X_test, y_test)
 
-for idx, year in enumerate(target_years):
-  # 유효한 날짜인지 확인 (예: 2월 31일 등 오류 방지)
-  try:
-    target_date = datetime(year, selected_month, selected_day).date()
-  except ValueError:
-    # 존재하지 않는 날짜(예: 윤년이 아닌 해의 2월 29일 등) 예외 처리
-    results_data.append({
-        "year": year,
-        "date_str": f"{year}{selected_month:02d}{selected_day:02d}",
-        "status": "invalid_date",
-    })
-    progress_bar.progress((idx + 1) / 10)
-    continue
+# 2. 의사결정트리 (질문으로 답하는 모델) - 제약 조건: 질문 3번까지(max_depth=3), 리프 노드 최소 5명(min_samples_leaf=5), 난수 고정
+dt_model = DecisionTreeClassifier(max_depth=3, min_samples_leaf=5, random_state=42)
+dt_model.fit(X_train, y_train)
 
-  # 올해 날짜가 아직 오지 않았거나 미래인 경우 집계 전 처리
-  if target_date > today:
-    results_data.append({
-        "year": year,
-        "date_str": f"{year}{selected_month:02d}{selected_day:02d}",
-        "status": "future_date",
-    })
-    progress_bar.progress((idx + 1) / 10)
-    continue
+dt_train_acc = dt_model.score(X_train, y_train)
+dt_test_acc = dt_model.score(X_test, y_test)
 
-  # API 호출을 위한 8자리 문자열 생성 (yyyymmdd)
-  dt_str = target_date.strftime("%Y%m%d")
-  api_response = get_box_office_data(dt_str)
+# 3. 베이스라인 모델 ("입력을 하나도 보지 않고 훈련용에서 많은 쪽으로만 답하는 모델")
+majority_class = y_train.mode()[0]
+baseline_train_acc = (y_train == majority_class).mean()
+baseline_test_acc = (y_test == majority_class).mean()
 
-  if api_response and "boxOfficeResult" in api_response:
-    box_list = api_response["boxOfficeResult"].get("dailyBoxOfficeList", [])
-    if box_list:
-      # 1위 영화 정보 추출 (rank가 "1"인 항목)
-      rank_1 = box_list[0]
-      results_data.append({
-          "year": year,
-          "date_str": dt_str,
-          "status": "success",
-          "movieNm": rank_1.get("movieNm"),
-          "audiCnt": int(rank_1.get("audiCnt", 0)),  # 숫자로 변환
-          "openDt": rank_1.get("openDt"),
-          "full_list": box_list,  # TOP 10 전체 표를 위해 보관
-      })
-    else:
-      results_data.append({
-          "year": year,
-          "date_str": dt_str,
-          "status": "no_data",
-      })
-  else:
-    results_data.append(
-        {"year": year, "date_str": dt_str, "status": "no_data"}
+st.markdown("---")
+st.subheader("📈 모델별 정확도 비교")
+
+col1, col2, col3 = st.columns(3)
+
+with col1:
+    st.metric(
+        label="로지스틱 회귀 (확률로 답하는 모델)",
+        value=f"{lr_test_acc * 100:.2f}%",
+        delta=f"훈련 정확도: {lr_train_acc * 100:.2f}%"
     )
 
-  progress_bar.progress((idx + 1) / 10)
+with col2:
+    st.metric(
+        label="의사결정트리 (질문으로 답하는 모델)",
+        value=f"{dt_test_acc * 100:.2f}%",
+        delta=f"훈련 정확도: {dt_train_acc * 100:.2f}%"
+    )
 
-progress_bar.empty()
+with col3:
+    st.metric(
+        label="다수 클래스 예측 모델 (베이스라인)",
+        value=f"{baseline_test_acc * 100:.2f}%",
+        delta=f"훈련 정확도: {baseline_train_acc * 100:.2f}%"
+    )
 
-# 6. 연도별 1위 영화 카드 형태로 나란히 보여주기
-st.subheader(
-    f"🏆 최근 10년 ({target_years[0]}년~{target_years[-1]}년)"
-    f" {selected_month}월 {selected_day}일 1위 영화"
+st.markdown("---")
+
+# ---------------------------------------------------------
+# 산점도 및 결정 경계 시각화
+# ---------------------------------------------------------
+st.subheader("🗺️ 모델 결정 경계 및 테스트 데이터 산점도")
+
+if len(selected_eng) < 2:
+    st.info("시각화를 위해 속성을 2개 이상 선택해 주세요.")
+else:
+    # 시각화용 축 선택 (고른 속성 중 처음 두 개 사용)
+    x_axis_eng = selected_eng[0]
+    y_axis_eng = selected_eng[1]
+    x_axis_kor = feature_map[x_axis_eng]
+    y_axis_kor = feature_map[y_axis_eng]
+
+    # 두 축이 아닌 나머지 속성들은 테스트 데이터의 중앙값으로 고정
+    other_features = [f for f in selected_eng if f not in [x_axis_eng, y_axis_eng]]
+    fixed_values = {}
+    fixed_desc_list = []
+    for f in other_features:
+        med_val = test_df[f].median()
+        fixed_values[f] = med_val
+        fixed_desc_list.append(f"**{feature_map[f]}**: {med_val:.2f}")
+
+    if fixed_desc_list:
+        st.markdown(f"ℹ️ 선택된 두 축({x_axis_kor}, {y_axis_kor}) 외의 속성은 테스트 데이터 중앙값으로 고정하여 계산했습니다: " + ", ".join(fixed_desc_list))
+
+    # 테스트 데이터 시각화용 데이터프레임
+    vis_test_df = test_df.copy()
+    vis_test_df["stroke_label"] = vis_test_df["stroke"].map({0: "아님 (0)", 1: "뇌졸중 (1)"})
+
+    fig = px.scatter(
+        vis_test_df,
+        x=x_axis_eng,
+        y=y_axis_eng,
+        color="stroke_label",
+        color_discrete_map={"아님 (0)": "#1f77b4", "뇌졸중 (1)": "#d62728"},
+        labels={x_axis_eng: x_axis_kor, y_axis_eng: y_axis_kor},
+        title=f"테스트 데이터 산점도 및 로지스틱 회귀 0.5 경계선 ({x_axis_kor} vs {y_axis_kor})"
+    )
+
+    # 1. 로지스틱 회귀 0.5 경계선 그리기 (Grid 생성)
+    x_min, x_max = vis_test_df[x_axis_eng].min(), vis_test_df[x_axis_eng].max()
+    y_min, y_max = vis_test_df[y_axis_eng].min(), vis_test_df[y_axis_eng].max()
+    
+    # 여유 공간 부여
+    x_range = x_max - x_min
+    y_range = y_max - y_min
+    x_min_plot, x_max_plot = x_min - x_range * 0.1, x_max + x_range * 0.1
+    y_min_plot, y_max_plot = y_min - y_range * 0.1, y_max + y_range * 0.1
+
+    xx, yy = np.meshgrid(np.linspace(x_min_plot, x_max_plot, 200), np.linspace(y_min_plot, y_max_plot, 200))
+    
+    # 예측용 그리드 데이터 생성 (모든 선택된 속성 포함)
+    grid_data = pd.DataFrame(index=np.arange(xx.ravel().shape[0]))
+    for f in selected_eng:
+        if f == x_axis_eng:
+            grid_data[f] = xx.ravel()
+        elif f == y_axis_eng:
+            grid_data[f] = yy.ravel()
+        else:
+            grid_data[f] = fixed_values[f]
+
+    # 로지스틱 회귀 예측 확률 계산
+    probs = lr_model.predict_proba(grid_data)[:, 1]
+    zz = probs.reshape(xx.shape)
+
+    # 등고선 추가 (확률 0.5인 선)
+    fig.add_trace(
+        go.Contour(
+            z=zz,
+            x=np.linspace(x_min_plot, x_max_plot, 200),
+            y=np.linspace(y_min_plot, y_max_plot, 200),
+            contours=dict(start=0.5, end=0.5, size=0, coloring='lines'),
+            line=dict(color='black', width=2, dash='dash'),
+            name='로지스틱 경계 (0.5)',
+            showscale=False
+        )
+    )
+
+    # 2. 의사결정트리가 나눈 칸을 옅은 색으로 칠하기 (배경 예측)
+    dt_preds = dt_model.predict(grid_data)
+    zz_dt = dt_preds.reshape(xx.shape)
+
+    fig.add_trace(
+        go.Contour(
+            z=zz_dt,
+            x=np.linspace(x_min_plot, x_max_plot, 200),
+            y=np.linspace(y_min_plot, y_max_plot, 200),
+            colorscale=[[0, 'rgba(31, 119, 180, 0.1)'], [1, 'rgba(214, 39, 40, 0.1)']],
+            showscale=False,
+            hoverinfo='skip',
+            name='의사결정트리 영역'
+        )
+    )
+
+    fig.update_layout(
+        xaxis_title=x_axis_kor,
+        yaxis_title=y_axis_kor,
+        legend_title="실제 뇌졸중 여부"
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+    # 경계선이 그림 범위 내에 있는지 확인 및 안내
+    # (여기서는 시각화 영역 내 데이터 분포 기준 판단 안내)
+    st.markdown("📌 **안내**: 점선은 로지스틱 회귀 모델이 확률 0.5로 분류하는 경계선이며, 배경의 옅은 색상은 의사결정트리 모델의 영역 구분을 나타냅니다.")
+
+st.markdown("---")
+
+# ---------------------------------------------------------
+# 의사결정트리 가지 그림 (Graphviz DOT)
+# ---------------------------------------------------------
+st.subheader("🌳 의사결정트리 구조 (가지 그림)")
+
+from sklearn.tree import export_graphviz
+
+# 한글 속성 이름 매핑 리스트 생성
+feature_names_kor = [feature_map[f] for f in selected_eng]
+
+# Graphviz DOT 문자열 생성 (한글 레이블 적용)
+dot_data = export_graphviz(
+    dt_model,
+    out_file=None,
+    feature_names=feature_names_kor,
+    class_names=["아님", "뇌졸중"],
+    filled=True,
+    rounded=True,
+    special_characters=True,
+    precision=2
 )
 
-# 카드를 여러 열로 배치 (한 줄에 5개씩 2줄 배치)
-cols_per_row = 5
-for i in range(0, len(results_data), cols_per_row):
-  row_items = results_data[i : i + cols_per_row]
-  cols = st.columns(cols_per_row)
+# st.graphviz_chart를 이용해 트리 시각화
+st.graphviz_chart(dot_data)
 
-  for col_idx, item in enumerate(row_items):
-    with cols[col_idx]:
-      st.markdown(f"### **{item['year']}년**")
-      if item["status"] == "success":
-        st.markdown(f"🎬 **{item['movieNm']}**")
-        st.markdown(f"👥 관객수: **{item['audiCnt']:,}명**")
-        st.markdown(f"📅 개봉일: {item['openDt']}")
-      elif item["status"] == "future_date":
-        st.info("⏳ 집계 전")
-      elif item["status"] == "invalid_date":
-        st.warning("⚠️ 존재하지 않는 날짜")
-      else:
-        st.error("❌ 데이터 없음")
-  st.markdown("---")
+# 트리 분석 요약 정보 계산
+n_nodes = dt_model.tree_.node_count
+# 리프 노드(자식이 없는 노드) 개수 계산
+is_leaf = (dt_model.tree_.children_left == -1) & (dt_model.tree_.children_right == -1)
+n_leaves = int(is_leaf.sum())
 
-# 7. 연도별 1위 영화 그날 관객수 세로 막대그래프
-st.subheader("📈 연도별 1위 영화 관객수 비교")
+# 리프 노드 중 '아님'으로 예측하는 노드 개수 계산 (다수 클래스가 0인 경우)
+leaf_values = dt_model.tree_.value[is_leaf]
+leaf_majority = np.argmax(leaf_values, axis=2).squeeze()
+n_leaves_not_stroke = int((leaf_majority == 0).sum())
 
-# 그래프용 데이터프레임 생성 (집계 성공한 데이터만 필터링)
-chart_data = [
-    {
-        "연도": str(item["year"]),
-        "영화명": item["movieNm"],
-        "관객수": item["audiCnt"],
-    }
-    for item in results_data
-    if item["status"] == "success"
-]
+# 실제로 모델이 사용한 속성(인덱스가 -2가 아닌 노드들의 feature)
+used_feature_indices = dt_model.tree_.feature
+used_feature_indices = used_feature_indices[used_feature_indices != -2]
+used_features_kor = set([feature_names_kor[i] for i in used_feature_indices])
 
-if chart_data:
-  df_chart = pd.DataFrame(chart_data)
-  # Plotly를 이용한 세로 막대그래프
-  fig = px.bar(
-      df_chart,
-      x="연도",
-      y="관객수",
-      text="관객수",
-      color="관객수",
-      hover_data=["영화명"],
-      title=f"연도별 {selected_month}월 {selected_day}일 1위 영화 관객수 추이",
-      labels={"관객수": "그날 관객수 (명)"},
-  )
-  fig.update_traces(texttemplate="%{text:,}명", textposition="outside")
-  fig.update_layout(uniformtext_minsize=8, uniformtext_mode="hide")
-  st.plotly_chart(fig, use_container_width=True)
-else:
-  st.warning("시각화할 관객수 데이터가 충분하지 않습니다.")
-
-st.divider()
-
-# 8. 특정 연도를 골라 그 해 그 날짜의 TOP 10 전체 표 보기
-st.subheader("📋 특정 연도 TOP 10 박스오피스 상세 조회")
-
-# 데이터가 존재하는 연도들만 셀렉트박스 옵션으로 제공
-available_years = [
-    item["year"] for item in results_data if item["status"] == "success"
-]
-
-if available_years:
-  selected_detail_year = st.selectbox(
-      "조회할 연도를 선택하세요", available_years, index=len(available_years) - 1
-  )
-
-  # 선택한 연도의 전체 목록 가져오기
-  selected_item = next(
-      item for item in results_data if item["year"] == selected_detail_year
-  )
-  top_10_list = selected_item["full_list"]
-
-  # 표로 보여주기 위해 데이터 가공 (숫자 문자열을 정수로 변환)
-  table_rows = []
-  for movie in top_10_list:
-    table_rows.append({
-        "순위": int(movie.get("rank", 0)),
-        "영화명": movie.get("movieNm"),
-        "개봉일": movie.get("openDt"),
-        "그날 관객수": int(movie.get("audiCnt", 0)),
-        "누적 관객수": int(movie.get("audiAcc", 0)),
-        "매출액 점유율(%)": float(movie.get("salesShare", 0)),
-    })
-
-  df_top10 = pd.DataFrame(table_rows)
-
-  # 보기 좋게 포맷팅 (콤마 추가)
-  st.markdown(
-      f"**{selected_detail_year}년 {selected_month}월 {selected_day}일** 박스오피스"
-      " TOP 10"
-  )
-  st.dataframe(
-      df_top10.style.format({
-          "그날 관객수": "{:,}명",
-          "누적 관객수": "{:,}명",
-          "매출액 점유율(%)": "{}%",
-      }),
-      use_container_width=True,
-      hide_index=True,
-  )
-else:
-  st.info("선택한 날짜에 조회 가능한 TOP 10 데이터가 없습니다.")
+st.markdown(f"""
+- **답을 내는 마디(리프 노드) 총 개수**: {n_leaves}개
+- **그중 '아님'이라고 답하는 마디 개수**: {n_leaves_not_stroke}개
+- **고른 속성 가운데 이 나무가 실제로 물은 것**: {", ".join(used_features_kor) if used_features_kor else "없음"}
+""")
